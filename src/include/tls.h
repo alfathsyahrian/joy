@@ -208,6 +208,7 @@ typedef struct tls_information {
     unsigned short int sni_length; /**< Length of SNI */
     char *certificate_buffer; /**< Certificate(s) data */
     unsigned short certificate_offset;
+    unsigned short segmented;
     fingerprint_t *tls_fingerprint;
 } tls_t;
 
@@ -228,6 +229,7 @@ struct tls_ciphertext {
     unsigned char lengthLo;
 };
 
+#define TLS_HANDSHAKE_HDR_LEN 4
 struct tls_handshake {
     unsigned char msg_type; /**< Handshake message type */
     unsigned char lengthHi; /**< First byte of Handshake length (big endian) */
@@ -236,6 +238,7 @@ struct tls_handshake {
     unsigned char body; /**< Body, a.k.a payload of the message */
 };
 
+#define TLS_HDR_LEN 5
 struct tls_header {
     unsigned char content_type;
     struct tls_protocol_version protocol_version;

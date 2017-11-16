@@ -1711,7 +1711,8 @@ void tls_update (struct tls_information *r,
                  unsigned int report_tls) {
     const char *start = payload;
     const struct tls_header *tls = NULL;
-    uint16_t tls_len;
+    uint16_t rem_len = len;
+    uint16_t tls_len = 0;
 
     /*
      * Check run flag.
@@ -1760,15 +1761,35 @@ void tls_update (struct tls_information *r,
         }
     }
 
-    while (len > 0) {
-        /* Cast beginning of payload to a tls_header */
-        tls = (const struct tls_header *)start;
+    while (rem_len > 0) {
+        /*
+         * Cast beginning of payload to a tls_header
+         */
+        if (r->segmented) {
+            /*
+             * Increment past the remaining data segment from the previous tls message
+             */
+            start += r->segmented;
+            tls = (const struct tls_header *)start;
+            /* Decrement the remaining length by the segmented value that we fast-forwarded */
+            rem_len = rem_len - r->segmented;
+            /* Reset the segmentation offset to nothing */
+            r->segmented = 0;
+        } else {
+            tls = (const struct tls_header *)start;
+        }
 
         /* Find the length of the TLS message */
         tls_len = tls_header_get_length(tls);
 
-        if (((tls_len == 0) || (tls_len > len)) && !ipfix_collect_port) {
+        if (tls_len == 0 || rem_len == 0) {
+            /* Invalid tls message length of 0 or the remaining amount after segment offset is 0 */
             return;
+        }
+
+        if (tls_len > rem_len && !ipfix_collect_port) {
+            /* The tls message has been split into segments */
+            r->segmented = tls_len - (rem_len - TLS_HDR_LEN);
         }
 
         if (r->certificate_offset && r->start_cert == 1 &&
@@ -1933,6 +1954,7 @@ void tls_update (struct tls_information *r,
          */
         if (r->tls_op < MAX_NUM_RCD_LEN) {
             r->tls_type[r->tls_op].content = tls->content_type;
+            // FIXME make this the remaining length?
             r->tls_len[r->tls_op] = tls_len;
             if (header == NULL) {
                 /* The pcap_pkthdr is not available, cannot get timestamp */
@@ -1947,14 +1969,14 @@ void tls_update (struct tls_information *r,
         r->tls_op++;
 
         /* Advance over header */
-        tls_len += 5;
+        tls_len += TLS_HDR_LEN;
         start += tls_len;
 
-        if ((tls_len == 0) || (tls_len > len)) {
+        if ((tls_len == 0) || (tls_len > rem_len)) {
             return;
         }
 
-        len -= tls_len;
+        rem_len -= tls_len;
     }
 
     return;
@@ -1978,32 +2000,40 @@ static int tls_certificate_process (const char *data,
                                     int data_len,
                                     struct tls_information *tls_info) {
     const struct tls_header *tls_hdr;
-    unsigned int tls_len;
+    unsigned int tls_len = 0;
+
+    tls_hdr = (const struct tls_header*)data;
+    if (tls_hdr->content_type != TLS_CONTENT_HANDSHAKE) {
+        return 0;
+    }
+    tls_len = tls_header_get_length(tls_hdr);
+
+    /* Adjust for the length of tls_hdr metadata */
+    data += TLS_HDR_LEN;
+    data_len -= TLS_HDR_LEN;
 
     while (data_len > 200) {
-        tls_hdr = (const struct tls_header*)data;
-        if (tls_hdr->content_type != TLS_CONTENT_HANDSHAKE) {
-            break;
-        }
+        unsigned int body_len = 0;
+        const struct tls_handshake *handshake = NULL;
 
-        /* Get the length of the handshake portion of the message */
-        tls_len = tls_header_get_length(tls_hdr);
+        /* Get the header of this handshake message */
+        handshake = (const struct tls_handshake *)data;
 
-        /* Only parse Certificate message types */
-        if (tls_hdr->handshake.msg_type == TLS_HANDSHAKE_CERTIFICATE) {
-            unsigned int body_len = tls_handshake_get_length(&tls_hdr->handshake);
-	    if (body_len > tls_len) {
-	      return 0;
+        /* Get the length of the message body */
+        body_len = tls_handshake_get_length(handshake);
+
+        if (body_len > tls_len) {
+            return 0;
 	    }
-            tls_server_certificate_parse(&tls_hdr->handshake.body, body_len, tls_info);
-        }
 
-        /* Adjust for the length of tls_hdr metadata */
-        tls_len += 5;
+        if (handshake->msg_type == TLS_HANDSHAKE_CERTIFICATE) {
+            /* Only parse Certificate message types */
+            tls_server_certificate_parse(&handshake->body, body_len, tls_info);
+        }
 
         /* Advance over this handshake message */
-        data += tls_len;
-        data_len -= tls_len;
+        data += (body_len + TLS_HANDSHAKE_HDR_LEN);
+        data_len -= (body_len + TLS_HANDSHAKE_HDR_LEN);
     }
 
     return 0;
@@ -2349,26 +2379,50 @@ void tls_print_json (const struct tls_information *data,
         }
     }
 
-    if (data->num_certificates) {
-        zprintf(f, ",\"server_cert\":[");
-        for (i = 0; i < data->num_certificates-1; i++) {
-            tls_certificate_printf(&data->certificates[i], f);
-            zprintf(f, "},");
-        }
-        tls_certificate_printf(&data->certificates[i], f);    
-        zprintf(f, "}]");
-    }
-    if (data_twin && data_twin->num_certificates) {
-        zprintf(f, ",\"server_cert\":[");
-        for (i = 0; i < data_twin->num_certificates-1; i++) {
-            tls_certificate_printf(&data_twin->certificates[i], f);
-            zprintf(f, "},");
-        }
-        tls_certificate_printf(&data_twin->certificates[i], f);    
-        zprintf(f, "}]");
-    }  
-    /* print out TLS application data lengths and times, if any */
 
+    if (data->role == role_client) {
+        if (data->num_certificates) {
+            zprintf(f, ",\"client_cert\":[");
+            for (i = 0; i < data->num_certificates-1; i++) {
+                tls_certificate_printf(&data->certificates[i], f);
+                zprintf(f, "},");
+            }
+            tls_certificate_printf(&data->certificates[i], f);
+            zprintf(f, "}]");
+        }
+
+        if (data_twin && data_twin->num_certificates) {
+            zprintf(f, ",\"server_cert\":[");
+            for (i = 0; i < data_twin->num_certificates-1; i++) {
+                tls_certificate_printf(&data_twin->certificates[i], f);
+                zprintf(f, "},");
+            }
+            tls_certificate_printf(&data_twin->certificates[i], f);
+            zprintf(f, "}]");
+        }
+    } else {
+        if (data->num_certificates) {
+            zprintf(f, ",\"server_cert\":[");
+            for (i = 0; i < data->num_certificates-1; i++) {
+                tls_certificate_printf(&data->certificates[i], f);
+                zprintf(f, "},");
+            }
+            tls_certificate_printf(&data->certificates[i], f);
+            zprintf(f, "}]");
+        }
+
+        if (data_twin && data_twin->num_certificates) {
+            zprintf(f, ",\"client_cert\":[");
+            for (i = 0; i < data_twin->num_certificates-1; i++) {
+                tls_certificate_printf(&data_twin->certificates[i], f);
+                zprintf(f, "},");
+            }
+            tls_certificate_printf(&data_twin->certificates[i], f);
+            zprintf(f, "}]");
+        }
+    }
+
+    /* print out TLS application data lengths and times, if any */
     if (data->tls_op) {
         if (data_twin) {
 	        len_time_print_interleaved_tls(data->tls_op, data->tls_len, data->tls_time, data->tls_type,
