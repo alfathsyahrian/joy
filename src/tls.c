@@ -2003,7 +2003,6 @@ static int tls_certificate_process (const char *data,
         const struct tls_header *tls_hdr = NULL;
         const struct tls_handshake *handshake = NULL;
         unsigned int tls_len = 0;
-        unsigned int body_len = 0;
 
         tls_hdr = (const struct tls_header*)data;
         if (tls_hdr->content_type != TLS_CONTENT_HANDSHAKE) {
@@ -2018,21 +2017,22 @@ static int tls_certificate_process (const char *data,
         /* Get the header of this handshake message */
         handshake = (const struct tls_handshake *)data;
 
-        /* Get the length of the message body */
-        body_len = tls_handshake_get_length(handshake);
-
-        if (body_len > tls_len) {
-            return 0;
-	    }
-
         if (handshake->msg_type == TLS_HANDSHAKE_CERTIFICATE) {
             /* Only parse Certificate message types */
+            unsigned int body_len = 0;
+
+            /* Get the length of the message body */
+            body_len = tls_handshake_get_length(handshake);
+
+            if (body_len > tls_len) {
+                return 0;
+            }
             tls_server_certificate_parse(&handshake->body, body_len, tls_info);
         }
 
         /* Advance over this handshake message */
-        data += (body_len + TLS_HANDSHAKE_HDR_LEN);
-        data_len -= (body_len + TLS_HANDSHAKE_HDR_LEN);
+        data += tls_len;
+        data_len -= tls_len;
     }
 
     return 0;
