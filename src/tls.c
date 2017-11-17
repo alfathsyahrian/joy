@@ -1999,22 +1999,21 @@ void tls_update (struct tls_information *r,
 static int tls_certificate_process (const char *data,
                                     int data_len,
                                     struct tls_information *tls_info) {
-    const struct tls_header *tls_hdr;
-    unsigned int tls_len = 0;
-
-    tls_hdr = (const struct tls_header*)data;
-    if (tls_hdr->content_type != TLS_CONTENT_HANDSHAKE) {
-        return 0;
-    }
-    tls_len = tls_header_get_length(tls_hdr);
-
-    /* Adjust for the length of tls_hdr metadata */
-    data += TLS_HDR_LEN;
-    data_len -= TLS_HDR_LEN;
-
     while (data_len > 200) {
-        unsigned int body_len = 0;
+        const struct tls_header *tls_hdr = NULL;
         const struct tls_handshake *handshake = NULL;
+        unsigned int tls_len = 0;
+        unsigned int body_len = 0;
+
+        tls_hdr = (const struct tls_header*)data;
+        if (tls_hdr->content_type != TLS_CONTENT_HANDSHAKE) {
+            return 0;
+        }
+        tls_len = tls_header_get_length(tls_hdr);
+
+        /* Adjust for the length of tls_hdr metadata */
+        data += TLS_HDR_LEN;
+        data_len -= TLS_HDR_LEN;
 
         /* Get the header of this handshake message */
         handshake = (const struct tls_handshake *)data;
