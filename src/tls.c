@@ -2006,6 +2006,7 @@ static int tls_certificate_process (const char *data,
 
         tls_hdr = (const struct tls_header*)data;
         if (tls_hdr->content_type != TLS_CONTENT_HANDSHAKE) {
+            /* Stop if we are past the handhshake */
             return 0;
         }
         tls_len = tls_header_get_length(tls_hdr);
@@ -2014,11 +2015,10 @@ static int tls_certificate_process (const char *data,
         data += TLS_HDR_LEN;
         data_len -= TLS_HDR_LEN;
 
-        /* Get the header of this handshake message */
-        handshake = (const struct tls_handshake *)data;
+        while (tls_len > 0) {
+            /* Get the header of this handshake message */
+            handshake = (const struct tls_handshake *)data;
 
-        if (handshake->msg_type == TLS_HANDSHAKE_CERTIFICATE) {
-            /* Only parse Certificate message types */
             unsigned int body_len = 0;
 
             /* Get the length of the message body */
@@ -2027,12 +2027,20 @@ static int tls_certificate_process (const char *data,
             if (body_len > tls_len) {
                 return 0;
             }
-            tls_server_certificate_parse(&handshake->body, body_len, tls_info);
-        }
 
-        /* Advance over this handshake message */
-        data += tls_len;
-        data_len -= tls_len;
+            data += TLS_HANDSHAKE_HDR_LEN;
+            data_len -= TLS_HANDSHAKE_HDR_LEN;
+
+            if (handshake->msg_type == TLS_HANDSHAKE_CERTIFICATE) {
+                /* Only parse Certificate message types */
+                tls_server_certificate_parse((const unsigned char*)data,
+                                             body_len, tls_info);
+            }
+
+            data += body_len;
+            data_len -= body_len;
+            tls_len -= body_len + TLS_HANDSHAKE_HDR_LEN;
+        }
     }
 
     return 0;
